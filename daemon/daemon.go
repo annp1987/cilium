@@ -1031,6 +1031,9 @@ func NewDaemon(c *Config) (*Daemon, error) {
 	// as the node address is required as sufix
 	policy.InitIdentityAllocator(&d)
 
+	// Start watcher for endpoint IP --> identity mappings in key-value store.
+	policy.InitIPIdentityWatcher(&d)
+
 	if !d.conf.IPv4Disabled {
 		// Allocate IPv4 service loopback IP
 		loopbackIPv4, _, err := ipam.AllocateNext("ipv4")

@@ -92,4 +92,6 @@ func listIdentities(args []string) {
 		Fatalf("Cannot marshal identities %s", err.Error())
 	}
 	fmt.Println(string(payload))
+
+	// TODO (ianvernon) - add option for cache output here.
 }
