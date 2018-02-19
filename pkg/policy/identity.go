@@ -55,7 +55,7 @@ const (
 var (
 	// IdentitiesPath is the path to where identities are stored in the key-value
 	// store.
-	IdentitiesPath   = path.Join(kvstore.BaseKeyPrefix, "state", "identities", "v1")
+	IdentitiesPath = path.Join(kvstore.BaseKeyPrefix, "state", "identities", "v1")
 
 	// IPIdentitiesPath is the path to where endpoint IPs are stored in the key-value
 	//store.
@@ -582,4 +582,9 @@ func InitIPIdentityWatcher(owner IPIdentityMappingOwner) {
 	setupIPIdentityWatcher.Do(func() {
 		go ipIdentityWatcher(owner)
 	})
+}
+
+// SetAddressSpace sets the value of this package's AddressSpace to addressSpace.
+func SetAddressSpace(addressSpace string) {
+	AddressSpace = addressSpace
 }

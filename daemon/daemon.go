@@ -880,6 +880,17 @@ func (d *Daemon) init() error {
 	return nil
 }
 
+// GetAddressSpace returns the address space (cluster, etc.) in which Cilium is
+// running.
+func GetAddressSpace() string {
+	if k8s.IsEnabled() {
+		return k8s.GetClusterName()
+	}
+
+	return policy.DefaultAddressSpace
+
+}
+
 // NewDaemon creates and returns a new Daemon with the parameters set in c.
 func NewDaemon(c *Config) (*Daemon, error) {
 	if c == nil {
@@ -938,6 +949,7 @@ func NewDaemon(c *Config) (*Daemon, error) {
 			node.EnablePerNodeRoutes()
 		}
 	}
+
 	// If the device has been specified, the IPv4AllocPrefix and the
 	// IPv6AllocPrefix were already allocated before the k8s.Init().
 	//
@@ -1030,6 +1042,9 @@ func NewDaemon(c *Config) (*Daemon, error) {
 	// This needs to be done after the node addressing has been configured
 	// as the node address is required as sufix
 	policy.InitIdentityAllocator(&d)
+
+	// Initialize address space variable in policy package.
+	policy.SetAddressSpace(GetAddressSpace())
 
 	// Start watcher for endpoint IP --> identity mappings in key-value store.
 	policy.InitIPIdentityWatcher(&d)

@@ -893,7 +893,7 @@ func (e *Endpoint) runIPv4IdentitySync() {
 			},
 			StopFunc: func() error {
 				e.Mutex.RLock()
-				ipKey := path.Join(policy.IPIdentitiesPath, e.IPv4.String())
+				ipKey := path.Join(policy.IPIdentitiesPath, policy.AddressSpace, e.IPv4.String())
 				e.Mutex.RUnlock()
 				if err := kvstore.Delete(ipKey); err != nil {
 					return fmt.Errorf("unable to delete endpoint IPv4 '%s': %s", ipKey, err)
@@ -913,7 +913,7 @@ func (e *Endpoint) runIPv6IdentitySync() {
 			DoFunc: func() error {
 
 				e.Mutex.RLock()
-				ipKey := path.Join(policy.IPIdentitiesPath, e.IPv6.String())
+				ipKey := path.Join(policy.IPIdentitiesPath, policy.AddressSpace, e.IPv6.String())
 				if e.SecurityIdentity == nil {
 					e.Mutex.RUnlock()
 					return nil
