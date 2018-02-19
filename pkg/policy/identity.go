@@ -72,6 +72,16 @@ func (id NumericIdentity) String() string {
 	return id.StringID()
 }
 
+// IsReservedIdentity returns whether id is one of the special reserved identities.
+func (id NumericIdentity) IsReservedIdentity() bool {
+	for reservedIdentity := range ReservedIdentityNames {
+		if id == reservedIdentity {
+			return true
+		}
+	}
+	return false
+}
+
 // Uint32 normalizes the ID for use in BPF program.
 func (id NumericIdentity) Uint32() uint32 {
 	return uint32(id)
