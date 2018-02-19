@@ -979,9 +979,9 @@ func (e *Endpoint) SetIdentity(owner Owner, identity *policy.Identity) {
 	// Whenever the identity is updated, propagate change to key-value store
 	// of IP to identity mapping.
 
-	// TODO (ianvernon): add check to only run this controller if !IPv4Disabled
-	// for daemon (owner)
-	e.runIPv4IdentitySync()
+	if e.IPv4 != nil {
+		e.runIPv4IdentitySync()
+	}
 	e.runIPv6IdentitySync()
 
 	e.Consumable.Mutex.RLock()
