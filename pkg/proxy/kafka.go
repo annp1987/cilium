@@ -22,7 +22,6 @@ import (
 	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/flowdebug"
 	"github.com/cilium/cilium/pkg/kafka"
-	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/policy"
@@ -38,51 +37,29 @@ const (
 
 // kafkaRedirect implements the Redirect interface for an l7 proxy
 type kafkaRedirect struct {
-	// protects all fields of this struct
-	lock.RWMutex
-
-	conf    kafkaConfiguration
-	epID    uint64
-	ingress bool
-	rules   policy.L7DataMap
-	socket  *proxySocket
-}
-
-// ToPort returns the redirect port of an OxyRedirect
-func (k *kafkaRedirect) ToPort() uint16 {
-	return k.conf.listenPort
-}
-
-func (k *kafkaRedirect) IsIngress() bool {
-	return k.ingress
+	redirect *Redirect
+	conf     kafkaConfiguration
+	rules    policy.L7DataMap
+	socket   *proxySocket
 }
 
 type destLookupFunc func(remoteAddr string, dport uint16) (uint32, string, error)
 
 type kafkaConfiguration struct {
-	policy        *policy.L4Filter
-	id            string
-	source        ProxySource
-	listenPort    uint16
 	noMarker      bool
 	lookupNewDest destLookupFunc
 }
 
-// createKafkaRedirect creates a redirect with corresponding proxy
-// configuration. This will launch a proxy instance.
-func createKafkaRedirect(conf kafkaConfiguration) (Redirect, error) {
+// createKafkaRedirect creates a redirect to the kafka proxy. The redirect structure passed
+// in is safe to access for reading and writing.
+func createKafkaRedirect(r *Redirect, conf kafkaConfiguration) (RedirectImplementation, error) {
 	redir := &kafkaRedirect{
-		conf:    conf,
-		epID:    conf.source.GetID(),
-		ingress: conf.policy.Ingress,
+		redirect: r,
+		conf:     conf,
 	}
 
 	if redir.conf.lookupNewDest == nil {
 		redir.conf.lookupNewDest = lookupNewDest
-	}
-
-	if err := redir.UpdateRules(conf.policy, nil); err != nil {
-		return nil, err
 	}
 
 	marker := 0
@@ -90,16 +67,16 @@ func createKafkaRedirect(conf kafkaConfiguration) (Redirect, error) {
 		markIdentity := int(0)
 		// As ingress proxy, all replies to incoming requests must have the
 		// identity of the endpoint we are proxying for
-		if redir.ingress {
-			markIdentity = int(conf.source.GetIdentity())
+		if r.ingress {
+			markIdentity = int(r.source.GetIdentity())
 		}
 
-		marker = GetMagicMark(redir.ingress, markIdentity)
+		marker = GetMagicMark(r.ingress, markIdentity)
 	}
 
 	// Listen needs to be in the synchronous part of this function to ensure that
 	// the proxy port is never refusing connections.
-	socket, err := listenSocket(fmt.Sprintf(":%d", redir.conf.listenPort), marker)
+	socket, err := listenSocket(fmt.Sprintf(":%d", r.ProxyPort), marker)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +94,7 @@ func createKafkaRedirect(conf kafkaConfiguration) (Redirect, error) {
 			}
 
 			if err != nil {
-				log.WithField(logfields.Port, redir.conf.listenPort).WithError(err).Error("Unable to accept connection on port")
+				log.WithField(logfields.Port, r.ProxyPort).WithError(err).Error("Unable to accept connection on port")
 				continue
 			}
 
@@ -141,7 +118,9 @@ func (k *kafkaRedirect) canAccess(req *kafka.RequestMessage, numIdentity policy.
 		}
 	}
 
-	rules := k.rules.GetRelevantRules(identity)
+	k.redirect.mutex.RLock()
+	rules := k.redirect.rules.GetRelevantRules(identity)
+	k.redirect.mutex.RUnlock()
 
 	if rules.Kafka == nil {
 		flowdebug.Log(log.WithField(logfields.Request, req.String()),
@@ -164,23 +143,21 @@ func (k *kafkaRedirect) canAccess(req *kafka.RequestMessage, numIdentity policy.
 	return req.MatchesRule(rules.Kafka)
 }
 
-func (k *kafkaRedirect) getSource() ProxySource {
-	return k.conf.source
-}
-
 // kafkaLogRecord wraps an accesslog.LogRecord so that we can define methods with a receiver
 type kafkaLogRecord struct {
 	accesslog.LogRecord
-	req *kafka.RequestMessage
+	redirect *Redirect
+	req      *kafka.RequestMessage
 }
 
 func (k *kafkaRedirect) newKafkaLogRecord(req *kafka.RequestMessage) kafkaLogRecord {
 	record := kafkaLogRecord{
 		LogRecord: req.GetLogRecord(),
 		req:       req,
+		redirect:  k.redirect,
 	}
 
-	if k.IsIngress() {
+	if k.redirect.ingress {
 		record.ObservationPoint = accesslog.Ingress
 	} else {
 		record.ObservationPoint = accesslog.Egress
@@ -189,7 +166,7 @@ func (k *kafkaRedirect) newKafkaLogRecord(req *kafka.RequestMessage) kafkaLogRec
 	return record
 }
 
-func (l *kafkaLogRecord) fillInfo(r Redirect, srcIPPort, dstIPPort string, srcIdentity uint32) {
+func (l *kafkaLogRecord) fillInfo(r *Redirect, srcIPPort, dstIPPort string, srcIdentity uint32) {
 	fillInfo(r, &l.LogRecord, srcIPPort, dstIPPort, srcIdentity)
 }
 
@@ -215,11 +192,9 @@ func (l *kafkaLogRecord) log(typ accesslog.FlowType, verdict accesslog.FlowVerdi
 		accesslog.FieldKafkaCorrelationID: l.Kafka.CorrelationID,
 	}), "Logging Kafka L7 flow record")
 
-	//
-	// Log multiple entries for multiple Kafka topics in a single
-	// request. GH #1815
-	//
+	l.redirect.updateAccounting(l.Type, l.Verdict)
 
+	// Log multiple entries for multiple Kafka topics in a single request.
 	topics := l.req.GetTopics()
 	for i := 0; i < len(topics); i++ {
 		l.Kafka.Topic.Topic = topics[i]
@@ -243,7 +218,7 @@ func (k *kafkaRedirect) handleRequest(pair *connectionPair, req *kafka.RequestMe
 
 	// retrieve identity of source together with original destination IP
 	// and destination port
-	srcIdentity, dstIPPort, err := k.conf.lookupNewDest(addr.String(), k.conf.listenPort)
+	srcIdentity, dstIPPort, err := k.conf.lookupNewDest(addr.String(), k.redirect.ProxyPort)
 	if err != nil {
 		scopedLog.WithField("source",
 			addr.String()).WithError(err).Error("Unable lookup original destination")
@@ -252,7 +227,7 @@ func (k *kafkaRedirect) handleRequest(pair *connectionPair, req *kafka.RequestMe
 		return
 	}
 
-	record.fillInfo(k, addr.String(), dstIPPort, srcIdentity)
+	record.fillInfo(k.redirect, addr.String(), dstIPPort, srcIdentity)
 
 	if !k.canAccess(req, policy.NumericIdentity(srcIdentity)) {
 		flowdebug.Log(scopedLog, "Kafka request is denied by policy")
@@ -275,7 +250,7 @@ func (k *kafkaRedirect) handleRequest(pair *connectionPair, req *kafka.RequestMe
 	if pair.Tx.Closed() {
 		marker := 0
 		if !k.conf.noMarker {
-			marker = GetMagicMark(k.ingress, int(srcIdentity))
+			marker = GetMagicMark(k.redirect.ingress, int(srcIdentity))
 		}
 
 		flowdebug.Log(scopedLog.WithFields(logrus.Fields{
@@ -343,7 +318,7 @@ func handleRequests(done <-chan struct{}, pair *connectionPair, c *proxyConnecti
 	}
 }
 
-func handleResponses(done <-chan struct{}, pair *connectionPair, c *proxyConnection, record kafkaLogRecord, handler kafkaRespMessageHander) {
+func (k *kafkaRedirect) handleResponses(done <-chan struct{}, pair *connectionPair, c *proxyConnection, record kafkaLogRecord, handler kafkaRespMessageHander) {
 	defer c.Close()
 	scopedLog := log.WithField(fieldID, pair.String())
 	for {
@@ -387,25 +362,14 @@ func (k *kafkaRedirect) handleResponseConnection(pair *connectionPair, record ka
 		"to":   pair.Rx,
 	}), "Proxying response Kafka connection")
 
-	handleResponses(k.socket.closing, pair, pair.Tx, record,
+	k.handleResponses(k.socket.closing, pair, pair.Tx, record,
 		func(pair *connectionPair, rsp *kafka.ResponseMessage) {
 			pair.Rx.Enqueue(rsp.GetRaw())
 		})
 }
 
 // UpdateRules replaces old l7 rules of a redirect with new ones.
-func (k *kafkaRedirect) UpdateRules(l4 *policy.L4Filter, wg *completion.WaitGroup) error {
-	if l4.L7Parser != policy.ParserTypeKafka {
-		return fmt.Errorf("invalid type %q, must be of type ParserTypeKafka", l4.L7Parser)
-	}
-
-	k.Lock()
-	k.rules = policy.L7DataMap{}
-	for key, val := range l4.L7RulesPerEp {
-		k.rules[key] = val
-	}
-	k.Unlock()
-
+func (k *kafkaRedirect) UpdateRules(wg *completion.WaitGroup) error {
 	return nil
 }
 
