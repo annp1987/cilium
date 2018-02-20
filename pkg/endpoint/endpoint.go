@@ -1059,7 +1059,6 @@ func mapPath(mapname string, id int) string {
 	return bpf.MapPath(mapname + strconv.Itoa(id))
 }
 
-
 // IngressPolicyMapPathLocked returns the path to the ingress policy map of endpoint.
 func (e *Endpoint) IngressPolicyMapPathLocked() string {
 	return mapPath(policymap.MapName+"ingress_", int(e.ID))
