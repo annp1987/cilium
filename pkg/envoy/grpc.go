@@ -29,13 +29,6 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
-const (
-	ListenerTypeURL           = "type.googleapis.com/envoy.api.v2.Listener"
-	NetworkPolicyTypeURL      = "type.googleapis.com/envoy.api.v2.NetworkPolicy"
-	NetworkPolicyHostsTypeURL = "type.googleapis.com/envoy.api.v2.NetworkPolicyHosts"
-	RouteConfigurationTypeURL = "type.googleapis.com/envoy.api.v2.RouteConfiguration"
-)
-
 var (
 	// ErrNotImplemented is the error returned by gRPC methods that are not
 	// implemented by Cilium.
@@ -45,17 +38,21 @@ var (
 // StartXDSGRPCServer starts a gRPC server to serve xDS APIs using the given
 // resource watcher and network listener.
 // Returns a function that stops the GRPC server when called.
-func StartXDSGRPCServer(listener net.Listener, ldsConfig, rdsConfig *xds.ResourceTypeConfiguration, resourceAccessTimeout time.Duration) context.CancelFunc {
+func StartXDSGRPCServer(listener net.Listener, ldsConfig, npdsConfig, nphdsConfig, rdsConfig *xds.ResourceTypeConfiguration, resourceAccessTimeout time.Duration) context.CancelFunc {
 	grpcServer := grpc.NewServer()
 
 	xdsServer := xds.NewServer(map[string]*xds.ResourceTypeConfiguration{
 		ListenerTypeURL:           ldsConfig,
+		NetworkPolicyTypeURL:      npdsConfig,
+		NetworkPolicyHostsTypeURL: nphdsConfig,
 		RouteConfigurationTypeURL: rdsConfig,
 	}, resourceAccessTimeout)
 	dsServer := (*xdsGRPCServer)(xdsServer)
 
 	api.RegisterAggregatedDiscoveryServiceServer(grpcServer, dsServer)
 	api.RegisterListenerDiscoveryServiceServer(grpcServer, dsServer)
+	api.RegisterNetworkPolicyDiscoveryServiceServer(grpcServer, dsServer)
+	api.RegisterNetworkPolicyHostsDiscoveryServiceServer(grpcServer, dsServer)
 	api.RegisterRouteDiscoveryServiceServer(grpcServer, dsServer)
 
 	reflection.Register(grpcServer)
@@ -83,6 +80,26 @@ func (s *xdsGRPCServer) StreamListeners(stream api.ListenerDiscoveryService_Stre
 }
 
 func (s *xdsGRPCServer) FetchListeners(ctx net_context.Context, req *api.DiscoveryRequest) (*api.DiscoveryResponse, error) {
+	// The Fetch methods are only called via the REST API, which is not
+	// implemented in Cilium. Only the Stream methods are called over gRPC.
+	return nil, ErrNotImplemented
+}
+
+func (s *xdsGRPCServer) StreamNetworkPolicies(stream api.NetworkPolicyDiscoveryService_StreamNetworkPoliciesServer) error {
+	return (*xds.Server)(s).HandleRequestStream(stream.Context(), stream, NetworkPolicyTypeURL)
+}
+
+func (s *xdsGRPCServer) FetchNetworkPolicies(ctx net_context.Context, req *api.DiscoveryRequest) (*api.DiscoveryResponse, error) {
+	// The Fetch methods are only called via the REST API, which is not
+	// implemented in Cilium. Only the Stream methods are called over gRPC.
+	return nil, ErrNotImplemented
+}
+
+func (s *xdsGRPCServer) StreamNetworkPolicyHosts(stream api.NetworkPolicyHostsDiscoveryService_StreamNetworkPolicyHostsServer) error {
+	return (*xds.Server)(s).HandleRequestStream(stream.Context(), stream, NetworkPolicyHostsTypeURL)
+}
+
+func (s *xdsGRPCServer) FetchNetworkPolicyHosts(ctx net_context.Context, req *api.DiscoveryRequest) (*api.DiscoveryResponse, error) {
 	// The Fetch methods are only called via the REST API, which is not
 	// implemented in Cilium. Only the Stream methods are called over gRPC.
 	return nil, ErrNotImplemented
