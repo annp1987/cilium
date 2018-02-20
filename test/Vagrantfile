@@ -6,8 +6,8 @@ $JOB_NAME = ENV['JOB_BASE_NAME'] || "LOCAL"
 $K8S_VERSION = ENV['K8S_VERSION'] || "1.8"
 $K8S_NODES = (ENV['K8S_NODES'] || "2").to_i
 
-$SERVER_BOX= "cilium/ubuntu"
-$SERVER_VERSION="24"
+$SERVER_BOX= "eloycoto/ubuntu_test"
+$SERVER_VERSION="21"
 
 ENV["VAGRANT_DEFAULT_PROVIDER"] = "virtualbox"
 Vagrant.configure("2") do |config|
