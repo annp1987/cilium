@@ -1579,7 +1579,7 @@ OKState:
 func (e *Endpoint) bumpPolicyRevision(revision uint64) {
 	e.Mutex.Lock()
 	if revision > e.policyRevision {
-		e.policyRevision = revision
+		e.setPolicyRevision(revision)
 	}
 	e.Mutex.Unlock()
 }
@@ -1796,4 +1796,9 @@ func (e *Endpoint) identityLabelsChanged(owner Owner, myChangeRev int) error {
 	}
 
 	return nil
+}
+
+// setPolicyRevision sets the policy revision with the given revision.
+func (e *Endpoint) setPolicyRevision(rev uint64) {
+	e.policyRevision = rev
 }
