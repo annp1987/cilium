@@ -79,9 +79,6 @@ func (e *Endpoint) allowIngressIdentity(owner Owner, id policy.NumericIdentity) 
 // Must be called with global endpoint.Mutex held.
 func (e *Endpoint) allowEgressIdentity(owner Owner, id policy.NumericIdentity) bool {
 	cache := policy.GetConsumableCache()
-	if !e.Opts.IsEnabled(OptionConntrack) {
-		return e.Consumable.AllowEgressIdentityAndReverseLocked(cache, id)
-	}
 	return e.Consumable.AllowEgressIdentityLocked(cache, id)
 }
 
@@ -312,8 +309,8 @@ func (e *Endpoint) regenerateConsumable(owner Owner, labelsMap *policy.IdentityC
 		c.IngressIdentities[ingressIdentity] = false
 	}
 
-	for k := range c.EgressConsumers {
-		c.EgressConsumers[k].DeletionMark = true
+	for egressIdentity := range c.EgressIdentities {
+		c.EgressIdentities[egressIdentity] = false
 	}
 
 	rulesAdd = policy.NewSecurityIDContexts()
@@ -485,9 +482,6 @@ func (e *Endpoint) regenerateConsumable(owner Owner, labelsMap *policy.IdentityC
 			// TODO (ianvernon): conntrack work for egress.
 		}
 	}
-
-	log.Debugf("regenerateConsumable: logging consumable maps")
-	c.LogContents()
 
 	if rulesAdd != nil {
 		rulesAddCpy := rulesAdd.DeepCopy() // Store the L3-L4 policy
