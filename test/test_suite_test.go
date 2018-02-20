@@ -33,6 +33,7 @@ import (
 	"github.com/onsi/ginkgo/reporters"
 	. "github.com/onsi/gomega"
 	"github.com/sirupsen/logrus"
+	"os/exec"
 )
 
 var (
@@ -142,7 +143,9 @@ var _ = BeforeSuite(func() {
 		err = vm.SetUpCilium()
 
 		if err != nil {
-			Fail(fmt.Sprintf("cilium was unable to be set up correctly: %s", err))
+			cmdoutput, err2 := exec.Command("journalctl", "-au", "cilium").CombinedOutput()
+
+			Fail(fmt.Sprintf("cilium was unable to be set up correctly: %s\n%s\n%s", err, string(cmdoutput), err2))
 		}
 
 	case helpers.K8s:
