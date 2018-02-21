@@ -938,17 +938,6 @@ func NewDaemon(c *Config) (*Daemon, error) {
 			node.EnablePerNodeRoutes()
 		}
 	}
-	// If the device has been specified, the IPv4AllocPrefix and the
-	// IPv6AllocPrefix were already allocated before the k8s.Init().
-	//
-	// If the device hasn't been specified, k8s.Init() allocated the
-	// IPv4AllocPrefix and the IPv6AllocPrefix from k8s node annotations.
-	//
-	// Then, we will calculate the IPv4 or IPv6 alloc prefix based on the IPv6
-	// or IPv4 alloc prefix, respectively, retrieved by k8s node annotations.
-	if config.Device == "undefined" {
-		node.InitDefaultPrefix("")
-	}
 
 	node.SetIPv4ClusterCidrMaskSize(v4ClusterCidrMaskSize)
 
