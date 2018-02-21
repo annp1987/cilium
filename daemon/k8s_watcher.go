@@ -15,6 +15,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -23,7 +25,10 @@ import (
 	"time"
 
 	"github.com/cilium/cilium/common/types"
+	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/k8s"
+	cilium_io "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	cilium_v1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v1"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	clientset "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned"
@@ -33,7 +38,6 @@ import (
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/serializer"
-
 	go_version "github.com/hashicorp/go-version"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
@@ -77,6 +81,8 @@ var (
 
 	ciliumv1VerConstr, _ = go_version.NewConstraint("< 1.7.0")
 	ciliumv2VerConstr, _ = go_version.NewConstraint(">= 1.7.0")
+
+	cnpCM *controller.Manager
 )
 
 // k8sAPIGroupsUsed is a lockable map to hold which k8s API Groups we have
@@ -232,6 +238,8 @@ func (d *Daemon) EnableK8sWatcher(reSyncPeriod time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("Unable to create cilium network policy client: %s", err)
 	}
+
+	cnpCM = controller.NewManager()
 
 	serKNPs := serializer.NewFunctionQueue(20)
 	serSvcs := serializer.NewFunctionQueue(20)
@@ -1446,26 +1454,88 @@ func (d *Daemon) addCiliumNetworkPolicyV1(ciliumV1Store cache.Store, cnp *cilium
 		}
 	}
 
-	var cnpns cilium_v1.CiliumNetworkPolicyNodeStatus
 	if err != nil {
-		cnpns = cilium_v1.CiliumNetworkPolicyNodeStatus{
-			OK:          false,
-			Error:       fmt.Sprintf("%s", err),
-			LastUpdated: cilium_v1.NewTimestamp(),
-		}
 		scopedLog.WithError(err).Warn("Unable to add CiliumNetworkPolicy")
 	} else {
-		cnpns = cilium_v1.CiliumNetworkPolicyNodeStatus{
-			OK:          true,
-			LastUpdated: cilium_v1.NewTimestamp(),
-		}
 		scopedLog.Info("Imported CiliumNetworkPolicy")
 	}
 
-	go func() {
-		k8s.UpdateCNPStatusV1(ciliumNPClient.CiliumV1(), ciliumV1Store,
-			k8s.BackOffLoopTimeout, node.GetName(), cnp, cnpns)
-	}()
+	ctrlName := cnp.GetControllerName()
+	cnpCM.UpdateController(ctrlName,
+		controller.ControllerParams{
+			DoFunc: func() error {
+				cnpns := cilium_v1.CiliumNetworkPolicyNodeStatus{
+					OK: true,
+				}
+
+				d.policy.Mutex.RLock()
+				rev := d.policy.GetRevision()
+				d.policy.Mutex.RUnlock()
+
+				cnpns.Revision = rev
+
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+
+				waitForEPsErr := endpointmanager.WaitForEndpointsAtPolicyRev(ctx, rev)
+
+				// If the deadline was reached then not all endpoints are enforcing
+				// the given policy.
+				cnpns.Enforcing = waitForEPsErr == nil
+
+				serverRuleStore, exists, err := ciliumV1Store.Get(cnp)
+				if !exists {
+					// If the CNP doesn't exist we clean up the controller
+					cnpCM.RemoveController(ctrlName)
+					return nil
+				}
+				if err != nil {
+					scopedLog.WithError(err).Warn("Unable to find v1.CiliumNetworkPolicy in local cache")
+					// Should we remove the controller in this case?
+					return err
+				}
+
+				serverRule, ok := serverRuleStore.(*cilium_v1.CiliumNetworkPolicy)
+				if !ok {
+					scopedLog.WithFields(logrus.Fields{
+						logfields.CiliumNetworkPolicy: logfields.Repr(serverRuleStore),
+					}).Warn("Received object of unknown type from API server, expecting v1.CiliumNetworkPolicy")
+					return errors.New("Received object of unknown type from API server, expecting v1.CiliumNetworkPolicy")
+				}
+
+				serverRuleCpy := serverRule.DeepCopy()
+				_, err2 := serverRuleCpy.Parse()
+				if err2 != nil {
+					// If we can't parse the rule then we should signalize
+					// it in the status
+					log.WithError(err2).WithField(logfields.Object, logfields.Repr(serverRuleCpy)).
+						Warn("Error parsing new CiliumNetworkPolicy rule")
+				}
+				if err != nil {
+					cnpns.Error = err.Error()
+					cnpns.OK = false
+				} else if err2 != nil {
+					cnpns.Error = err2.Error()
+					cnpns.OK = false
+				}
+
+				nodeName := node.GetName()
+
+				cnpns.LastUpdated = cilium_v1.NewTimestamp()
+				serverRuleCpy.SetPolicyStatus(nodeName, cnpns)
+				ns := cilium_io.ExtractNamespace(&serverRuleCpy.ObjectMeta)
+
+				_, err2 = ciliumNPClient.CiliumV1().CiliumNetworkPolicies(ns).Update(serverRuleCpy)
+				if err2 == nil {
+					scopedLog.WithField("status", serverRuleCpy.Status).Debug("successfully updated with status")
+				} else {
+					return err2
+				}
+				return waitForEPsErr
+			},
+			RunInterval: time.Duration(1) * time.Minute,
+		},
+	)
 }
 
 // Deprecated: use deleteCiliumNetworkPolicyV2
@@ -1477,6 +1547,9 @@ func (d *Daemon) deleteCiliumNetworkPolicyV1(cnp *cilium_v1.CiliumNetworkPolicy)
 	})
 
 	scopedLog.Debug("Deleting CiliumNetworkPolicy")
+
+	ctrlName := cnp.GetControllerName()
+	cnpCM.RemoveController(ctrlName)
 
 	rules, err := cnp.Parse()
 	if err == nil {
@@ -1550,26 +1623,88 @@ func (d *Daemon) addCiliumNetworkPolicyV2(ciliumV2Store cache.Store, cnp *cilium
 		}
 	}
 
-	var cnpns cilium_v2.CiliumNetworkPolicyNodeStatus
 	if err != nil {
-		cnpns = cilium_v2.CiliumNetworkPolicyNodeStatus{
-			OK:          false,
-			Error:       fmt.Sprintf("%s", err),
-			LastUpdated: cilium_v2.NewTimestamp(),
-		}
 		scopedLog.WithError(err).Warn("Unable to add CiliumNetworkPolicy")
 	} else {
-		cnpns = cilium_v2.CiliumNetworkPolicyNodeStatus{
-			OK:          true,
-			LastUpdated: cilium_v2.NewTimestamp(),
-		}
 		scopedLog.Info("Imported CiliumNetworkPolicy")
 	}
 
-	go func() {
-		k8s.UpdateCNPStatusV2(ciliumNPClient.CiliumV2(), ciliumV2Store,
-			k8s.BackOffLoopTimeout, node.GetName(), cnp, cnpns)
-	}()
+	ctrlName := cnp.GetControllerName()
+	cnpCM.UpdateController(ctrlName,
+		controller.ControllerParams{
+			DoFunc: func() error {
+				cnpns := cilium_v2.CiliumNetworkPolicyNodeStatus{
+					OK: true,
+				}
+
+				d.policy.Mutex.RLock()
+				rev := d.policy.GetRevision()
+				d.policy.Mutex.RUnlock()
+
+				cnpns.Revision = rev
+
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+
+				waitForEPsErr := endpointmanager.WaitForEndpointsAtPolicyRev(ctx, rev)
+
+				// If the deadline was reached then not all endpoints are enforcing
+				// the given policy.
+				cnpns.Enforcing = waitForEPsErr == nil
+
+				serverRuleStore, exists, err := ciliumV2Store.Get(cnp)
+				if !exists {
+					// If the CNP doesn't exist we clean up the controller
+					cnpCM.RemoveController(ctrlName)
+					return nil
+				}
+				if err != nil {
+					scopedLog.WithError(err).Warn("Unable to find v2.CiliumNetworkPolicy in local cache")
+					// Should we remove the controller in this case?
+					return err
+				}
+
+				serverRule, ok := serverRuleStore.(*cilium_v2.CiliumNetworkPolicy)
+				if !ok {
+					scopedLog.WithFields(logrus.Fields{
+						logfields.CiliumNetworkPolicy: logfields.Repr(serverRuleStore),
+					}).Warn("Received object of unknown type from API server, expecting v2.CiliumNetworkPolicy")
+					return errors.New("Received object of unknown type from API server, expecting v2.CiliumNetworkPolicy")
+				}
+
+				serverRuleCpy := serverRule.DeepCopy()
+				_, err2 := serverRuleCpy.Parse()
+				if err2 != nil {
+					// If we can't parse the rule then we should signalize
+					// it in the status
+					log.WithError(err2).WithField(logfields.Object, logfields.Repr(serverRuleCpy)).
+						Warn("Error parsing new CiliumNetworkPolicy rule")
+				}
+				if err != nil {
+					cnpns.Error = err.Error()
+					cnpns.OK = false
+				} else if err2 != nil {
+					cnpns.Error = err2.Error()
+					cnpns.OK = false
+				}
+
+				nodeName := node.GetName()
+
+				cnpns.LastUpdated = cilium_v2.NewTimestamp()
+				serverRuleCpy.SetPolicyStatus(nodeName, cnpns)
+				ns := cilium_io.ExtractNamespace(&serverRuleCpy.ObjectMeta)
+
+				_, err2 = ciliumNPClient.CiliumV2().CiliumNetworkPolicies(ns).Update(serverRuleCpy)
+				if err2 == nil {
+					scopedLog.WithField("status", serverRuleCpy.Status).Debug("successfully updated with status")
+				} else {
+					return err2
+				}
+				return waitForEPsErr
+			},
+			RunInterval: time.Duration(1) * time.Minute,
+		},
+	)
 }
 
 func (d *Daemon) deleteCiliumNetworkPolicyV2(cnp *cilium_v2.CiliumNetworkPolicy) {
@@ -1580,6 +1715,9 @@ func (d *Daemon) deleteCiliumNetworkPolicyV2(cnp *cilium_v2.CiliumNetworkPolicy)
 	})
 
 	scopedLog.Debug("Deleting CiliumNetworkPolicy")
+
+	ctrlName := cnp.GetControllerName()
+	cnpCM.RemoveController(ctrlName)
 
 	rules, err := cnp.Parse()
 	if err == nil {

@@ -74,6 +74,12 @@ type CiliumNetworkPolicyNodeStatus struct {
 
 	// LastUpdated contains the last time this status was updated
 	LastUpdated Timestamp `json:"lastUpdated,omitempty"`
+
+	// Revision contains the current policy revision of the node.
+	Revision uint64 `json:"localPolicyRevision,omitempty"`
+
+	// Enforcing is set if all endpoints are at the given Revision number.
+	Enforcing bool `json:"enforcing,omitempty"`
 }
 
 // NewTimestamp creates a new Timestamp with the current time.Now()
@@ -143,6 +149,12 @@ func (r *CiliumNetworkPolicy) Parse() (api.Rules, error) {
 	}
 
 	return retRules, nil
+}
+
+// GetControllerName returns the unique name for the controller manager.
+func (r *CiliumNetworkPolicy) GetControllerName() string {
+	name := k8sconst.GetObjNamespaceName(&r.ObjectMeta)
+	return fmt.Sprintf("%s (v1 %s)", k8sconst.ControllerPrefix, name)
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

@@ -27,6 +27,9 @@ const (
 	// PodNamespaceLabel is the label used in kubernetes containers to
 	// specify which namespace they belong to.
 	PodNamespaceLabel = types.KubernetesPodNamespaceLabel
+	// ControllerPrefix is the prefix used for the controllers set up
+	// to sync the CNP with kube-apiserver.
+	ControllerPrefix = "sync-cnp-policy-status"
 )
 
 const (
