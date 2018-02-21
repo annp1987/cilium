@@ -343,3 +343,18 @@ func AddEndpoint(owner endpoint.Owner, ep *endpoint.Endpoint, reason string) err
 
 	return nil
 }
+
+// WaitForEndpointsAtPolicyRev waits for all endpoints to be at a given policy
+// revision.
+func WaitForEndpointsAtPolicyRev(ctx context.Context, rev uint64) error {
+	eps := GetEndpoints()
+	for i := range eps {
+		<-eps[i].WaitForPolicyRevision(ctx, rev)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
